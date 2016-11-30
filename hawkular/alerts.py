@@ -130,6 +130,12 @@ class Severity:
 
 class HawkularAlertsClient(HawkularBaseClient):
     def list_triggers(self, ids=[], tags=[]):
+        """
+        Lists defined triggers in the system.
+        :param ids: List of trigger ids. If provided, limits to the given triggers
+        :param tags:List of tags. If provided, limits to the given tags.
+        :return: List of trigger objects
+        """
         ids = ','.join(ids)
         tags = ','.join(tags)
         url = self._service_url('triggers', {'tags': tags, 'ids': ids})
@@ -137,6 +143,11 @@ class HawkularAlertsClient(HawkularBaseClient):
         return Trigger.list_to_object_list(triggers_dict)
 
     def create_trigger(self, trigger):
+        """
+        Creates the trigger definition.
+        :param  trigger: Trigger or FullTrigger object, the trigger to be created
+        :return: Trigger or FullTrigger created
+        """
         data = self._serialize_object(trigger)
         if isinstance(trigger, FullTrigger):
             returned_dict = self._post(self._service_url(['triggers', 'trigger']), data)
@@ -146,6 +157,12 @@ class HawkularAlertsClient(HawkularBaseClient):
             return Trigger(returned_dict)
 
     def get_trigger(self, trigger_id, full=False):
+        """
+        Obtains one Trigger definition from the server.
+        :param trigger_id:  Id of the trigger to fetch
+        :param full: full If true then conditions and dampenings for the trigger are also fetched
+        :return: Trigger or FullTrigger
+        """
         if full:
             returned_dict = self._get(self._service_url(['triggers', 'trigger', trigger_id]))
             return FullTrigger(returned_dict)
@@ -154,20 +171,43 @@ class HawkularAlertsClient(HawkularBaseClient):
             return Trigger(returned_dict)
 
     def create_group_trigger(self, trigger):
+        """
+         Creates the group trigger definition.
+        :param trigger: Trigger object, the group trigger to be created
+        :return: The newly created group trigger
+        """
         data = self._serialize_object(trigger)
         return Trigger(self._post(self._service_url(['triggers', 'groups']), data))
 
     def create_group_member(self, member):
+        """
+        Creates a member trigger
+        :param  Member: the group member to be added
+        :rtype  Member GroupMemberInfo
+        :return: The newly created member trigger
+        """
         data = self._serialize_object(member)
         return Trigger(self._post(self._service_url(['triggers', 'groups', 'members']), data))
 
     def create_group_conditions(self, group_id, trigger_mode, conditions):
+        """
+        Creates the group conditions definitions.
+        :param group_id: ID of the group trigger to set conditions
+        :param trigger_mode:  Mode of the trigger where conditions are attached
+        :param conditions:the conditions to set into the group trigger with the mapping with the data_id members map
+        :return: List of asociated conditions.
+        """
         data = self._serialize_object(conditions)
         url = self._service_url(['triggers', 'groups', group_id, 'conditions', trigger_mode])
         response = self._put(url, data)
         return Condition.list_to_object_list(response)
 
     def list_dampenings(self, trigger_id):
+        """
+        Lists defined dampenings for a trigger
+        :param trigger_id: ID of the trigger to be listed the dampenings
+        :return: List of dampenings
+        """
         url = self._service_url(['triggers', trigger_id, 'dampenings'])
         data = self._get(url)
         return Dampening.list_to_object_list(data)
