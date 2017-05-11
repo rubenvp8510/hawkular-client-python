@@ -15,45 +15,116 @@
    limitations under the License.
 """
 from __future__ import unicode_literals
-
-import codecs
 import time
 import collections
-import base64
-import ssl
 from datetime import datetime, timedelta
 
+from hawkular.client import ApiOject, HawkularBaseClient, HawkularMetricsError
 try:
     import simplejson as json
 except ImportError:
     import json
 
-from hawkular.client import ApiOject, HawkularBaseClient, HawkularMetricsError
-from hawkular.client import HawkularMetricsConnectionError, HawkularMetricsStatusError
 
 class MetricType:
-    Gauge = 'gauges'
+    Gauge = 'gauge'
     Availability = 'availability'
-    Counter = 'counters'
-    String = 'strings'
+    Counter = 'counter'
+    String = 'string'
     Rate = 'rate'
-    _Metrics = 'metrics'
+    Metrics = 'metrics'
 
-    @staticmethod
-    def short(metric_type):
-        if metric_type is MetricType.Gauge:
-            return 'gauge'
-        elif metric_type is MetricType.Counter:
-            return 'counter'
-        elif metric_type is MetricType.String:
-            return 'string'
-        else:
-            return 'availability'
+    mapping_url_names = {
+        Gauge: 'gauges',
+        Availability: 'availability',
+        Counter: 'counters',
+        String: 'strings',
+        Rate: 'rates',
+        Metrics: 'metrics'
+    }
+
+    @classmethod
+    def url_name(cls, metric_type):
+        return cls.mapping_url_names.get(metric_type, None)
+
 
 class Availability:
     Down = 'down'
     Up = 'up'
     Unknown = 'unknown'
+
+
+class Percentile(ApiOject):
+    __slots__ = [
+        'quantile', 'value'
+    ]
+
+
+class Metric(ApiOject):
+    __slots__ = [
+        'data_points', 'data_retention', 'id', 'type', 'max_timestamp', 'min_timestamp',
+        'tags', 'tenant_id', 'type'
+    ]
+
+    def add_datapoint(self, dp):
+        if self.data_points is None:
+            self.data_points = []
+        self.data_points.append(dp)
+
+    def add_datapoints(self, *dps):
+        if self.data_points is None:
+            self.data_points = []
+
+        for d in dps:
+            self.data_points.append(d)
+
+
+class DataPoint(ApiOject):
+    __slots__ = [
+        'tags', 'timestamp', 'value'
+    ]
+
+    def __init__(self, dictionary=dict()):
+        ApiOject.__init__(self, dictionary)
+        if self.timestamp is None:
+            self.timestamp = time_millis()
+
+    def to_json_object(self):
+        dictionary = {}
+        for attribute in self.__slots__:
+            if hasattr(self,attribute):
+                attr_value = getattr(self,attribute)
+                if type(attr_value) is datetime:
+                    attr_value = datetime_to_time_millis(attr_value)
+            dictionary[attribute] = attr_value
+        return ApiOject.transform_dict_to_camelcase(dictionary)
+
+
+class MixedMetrics(ApiOject):
+    __slots__ = [
+        'availabilities', 'counters', 'gauges', 'strings'
+    ]
+
+
+class Tenant(ApiOject):
+    __slots__ = ['id', 'retentions']
+
+
+class NumericBucketPoint(ApiOject):
+    __slots__ = [
+        'avg', 'empty', 'end', 'max', 'median', 'min', 'percentiles', 'samples', 'start', 'sum'
+    ]
+
+    def __init__(self, dictionary=dict()):
+        udict = ApiOject.transform_dict_to_underscore(dictionary)
+        for k in self.__slots__:
+            if k == 'percentiles':
+                value = udict.get(k, self.defaults.get(k))
+                value_list = Percentile.list_to_object_list(value)
+                setattr(self, k, value_list)
+            else:
+                setattr(self, k, udict.get(k, self.defaults.get(k)))
+
 
 class HawkularMetricsClient(HawkularBaseClient):
     """
@@ -63,8 +134,9 @@ class HawkularMetricsClient(HawkularBaseClient):
 
     def _get_url(self, metric_type=None):
         if metric_type is None:
-            metric_type = MetricType._Metrics
-
+            metric_type = MetricType.url_name(MetricType.Metrics)
+        else:
+            metric_type = MetricType.url_name(metric_type)
         return self._get_base_url() + '{0}'.format(metric_type)
 
     def _get_metrics_single_url(self, metric_type, metric_id):
@@ -123,19 +195,22 @@ class HawkularMetricsClient(HawkularBaseClient):
         r = collections.defaultdict(list)
 
         for d in data:
-            metric_type = d.pop('type', None)
-            if metric_type is None:
-                raise HawkularMetricsError('Undefined MetricType')
-            r[metric_type].append(d)
+            if not isinstance(d, ApiOject):
+                metric_type = d.pop('type', None)
+                if metric_type is None:
+                    raise HawkularMetricsError('Undefined MetricType')
+                r[metric_type].append(d)
+            else:
+                r[d.type].append(d)
 
         # This isn't transactional, but .. ouh well. One can always repost everything.
         for l in r:
-            self._post(self._get_metrics_raw_url(self._get_url(l)), r[l],parse_json=False)
+            serialized_json = self._serialize_object(r[l])
+            self._post(self._get_metrics_raw_url(self._get_url(l)), serialized_json, parse_json=False)
 
     def push(self, metric_type, metric_id, value, timestamp=None):
         """
         Pushes a single metric_id, datapoint combination to the server.
-
         This method is an assistant method for the put method by removing the need to
         create data structures first.
 
@@ -172,10 +247,11 @@ class HawkularMetricsClient(HawkularBaseClient):
             else:
                 query_options['end'] = end
 
-        return self._get(
+        response =  self._get(
             self._get_metrics_raw_url(
                 self._get_metrics_single_url(metric_type, metric_id)),
             **query_options)
+        return DataPoint.list_to_object_list(response)
 
     def query_metric_stats(self, metric_type, metric_id, start=None, end=None, bucketDuration=None, **query_options):
         """
@@ -206,10 +282,11 @@ class HawkularMetricsClient(HawkularBaseClient):
             else:
                 query_options['bucketDuration'] = bucketDuration
 
-        return self._get(
+        response = self._get(
             self._get_metrics_stats_url(
                 self._get_metrics_single_url(metric_type, metric_id)),
             **query_options)
+        return NumericBucketPoint.list_to_object_list(response)
 
     def query_metric_definition(self, metric_type, metric_id):
         """
@@ -218,8 +295,9 @@ class HawkularMetricsClient(HawkularBaseClient):
         :param metric_type: MetricType to be matched (required)
         :param metric_id: Exact string matching metric id
         """
-        return self._get(self._get_metrics_single_url(metric_type, metric_id))
-    
+        response = self._get(self._get_metrics_single_url(metric_type, metric_id))
+        return Metric.list_to_object_list(response)
+
     def query_metric_definitions(self, metric_type=None, id_filter=None, **tags):
         """
         Query available metric definitions.
@@ -234,12 +312,13 @@ class HawkularMetricsClient(HawkularBaseClient):
             params['id'] = id_filter
 
         if metric_type is not None:
-            params['type'] = MetricType.short(metric_type)
+            params['type'] = metric_type
 
         if len(tags) > 0:
             params['tags'] = self._transform_tags(**tags)
 
-        return self._get(self._get_url(), **params)
+        response = self._get(self._get_url(), **params)
+        return Metric.list_to_object_list(response)
 
     def query_tag_values(self, metric_type=None, **tags):
         """
@@ -249,38 +328,19 @@ class HawkularMetricsClient(HawkularBaseClient):
         :param tags: A dict of tag key/value pairs. Uses Hawkular-Metrics tag query language for syntax
         """
         tagql = self._transform_tags(**tags)
-
         return self._get(self._get_metrics_tags_url(self._get_url(metric_type)) + '/{}'.format(tagql))
 
-    def create_metric_definition(self, metric_type, metric_id, **tags):
-        """
-        Create metric definition with custom definition. **tags should be a set of tags, such as
-        units, env ..
-
-        :param metric_type: MetricType of the new definition
-        :param metric_id: metric_id is the string index of the created metric
-        :param tags: Key/Value tag values of the new metric
-        """
-        item = { 'id': metric_id }
-        if len(tags) > 0:
-            # We have some arguments to pass..
-            data_retention = tags.pop('dataRetention', None)
-            if data_retention is not None:
-                item['dataRetention'] = data_retention
-
-            if len(tags) > 0:
-                item['tags'] = tags
-
-        json_data = json.dumps(item, indent=2)
+    def create_metric_definition(self, metric_definition):
+        metric_type = metric_definition.type
+        json_data = self._serialize_object(metric_definition)
         try:
             self._post(self._get_url(metric_type), json_data)
         except HawkularMetricsError as e:
             if e.code == 409:
                 return False
             raise e
-
         return True
-        
+
     def query_metric_tags(self, metric_type, metric_id):
         """
         Returns a list of tags in the metric definition.
@@ -317,25 +377,27 @@ class HawkularMetricsClient(HawkularBaseClient):
     """
     Tenant related queries
     """
-    
-    def query_tenants(self):
-        """
-        Query available tenants and their information.
-        """
-        return self._get(self._get_tenants_url())
-
     def create_tenant(self, tenant_id, retentions=None):
         """
         Create a tenant. Currently nothing can be set (to be fixed after the master
         version of Hawkular-Metrics has fixed implementation.
-
         :param retentions: A set of retention settings, see Hawkular-Metrics documentation for more info
-        """        
+        """
         item = { 'id': tenant_id }
         if retentions is not None:
             item['retentions'] = retentions
 
         self._post(self._get_tenants_url(), json.dumps(item, indent=2))
+
+    def query_tenants(self):
+        """
+        Query available tenants and their information.
+        """
+        returned_dict = self._get(self._get_tenants_url())
+        if type(returned_dict) is list:
+            return Tenant.list_to_object_list(returned_dict)
+        else:
+            return None
 
     def delete_tenant(self, tenant_id):
         """
@@ -347,17 +409,22 @@ class HawkularMetricsClient(HawkularBaseClient):
 """
 Static methods
 """
+
+
 def time_millis():
     """
     Returns current milliseconds since epoch
     """
     return int(round(time.time() * 1000))
 
+
 def timedelta_to_duration(td):
     return '{}s'.format(int(td.total_seconds()))
 
+
 def datetime_to_time_millis(dt):
     return '{:.0f}'.format((dt - HawkularMetricsClient.epoch).total_seconds() * 1000)
+
 
 def create_datapoint(value, timestamp=None, **tags):
     """
@@ -380,6 +447,7 @@ def create_datapoint(value, timestamp=None, **tags):
         item['tags'] = tags
 
     return item
+
 
 def create_metric(metric_type, metric_id, data):
     """

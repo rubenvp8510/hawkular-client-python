@@ -114,6 +114,23 @@ class ApiOject:
             return [cls(ob) for ob in o]
         return []
 
+    def __eq__(self, other):
+        for a in self.__slots__:
+            if hasattr(self, a) and hasattr(other, a) and getattr(self, a) == getattr(other, a):
+                continue
+            else:
+                return False
+        return True
+
+    def __ne__(self, other):
+        for a in self.__slots__:
+            if (hasattr(self, a) and not hasattr(other, a)) or (not hasattr(self, a) and hasattr(other, a)) \
+                    or getattr(self, a) != getattr(other, a):
+                return True
+            else:
+                continue
+        return False
+
 
 class HawkularHTTPErrorProcessor(HTTPErrorProcessor):
     """
